@@ -4,20 +4,23 @@
 #include <eigen3/Eigen/Geometry>
 #include <unordered_set>
 
+#include <openvdb/openvdb.h>
+#include <openvdb/Types.h>
+
 namespace Bonxai
 {
 
 template <class Functor>
-void RayIterator(const CoordT& key_origin,
-                 const CoordT& key_end,
+void RayIterator(const openvdb::Coord& key_origin,
+                 const openvdb::Coord& key_end,
                  const Functor& func);
 
-inline void ComputeRay(const CoordT& key_origin,
-                       const CoordT& key_end,
-                       std::vector<CoordT>& ray)
+inline void ComputeRay(const openvdb::Coord& key_origin,
+                       const openvdb::Coord& key_end,
+                       std::vector<openvdb::Coord>& ray)
 {
   ray.clear();
-  RayIterator(key_origin, key_end, [&ray](const CoordT& coord)
+  RayIterator(key_origin, key_end, [&ray](const openvdb::Coord& coord)
               {
                 ray.push_back(coord);
                 return true;
@@ -62,6 +65,8 @@ public:
       , probability_log(UnknownProbability){};
   };
 
+  using OpenVdbGrid = openvdb::Grid<openvdb::tree::Tree4<int32_t>::Type>;
+
   /// These default values are the same as OctoMap
   struct Options
   {
@@ -78,9 +83,9 @@ public:
 
   ProbabilisticMap(double resolution);
 
-  [[nodiscard]] VoxelGrid<CellT>& grid();
+  [[nodiscard]] OpenVdbGrid& grid();
 
-  [[nodiscard]] const VoxelGrid<CellT>& grid() const;
+  [[nodiscard]] const OpenVdbGrid& grid() const;
 
   [[nodiscard]] const Options& options() const;
 
@@ -114,38 +119,38 @@ public:
   // Once finished adding points, you must call updateFreeCells()
   void addMissPoint(const Vector3D& point);
 
-  [[nodiscard]] bool isOccupied(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isOccupied(const openvdb::Coord& coord) const;
 
-  [[nodiscard]] bool isUnknown(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isUnknown(const openvdb::Coord& coord) const;
 
-  [[nodiscard]] bool isFree(const Bonxai::CoordT& coord) const;
+  [[nodiscard]] bool isFree(const openvdb::Coord& coord) const;
 
-  void getOccupiedVoxels(std::vector<Bonxai::CoordT>& coords);
+  void getOccupiedVoxels(std::vector<openvdb::Coord>& coords);
 
-  void getFreeVoxels(std::vector<Bonxai::CoordT>& coords);
+  void getFreeVoxels(std::vector<openvdb::Coord>& coords);
 
   template <typename PointT>
   void getOccupiedVoxels(std::vector<PointT>& points)
   {
-    thread_local std::vector<Bonxai::CoordT> coords;
+    thread_local std::vector<openvdb::Coord> coords;
     coords.clear();
     getOccupiedVoxels(coords);
     for (const auto& coord : coords)
     {
-      const auto p = _grid.coordToPos(coord);
-      points.emplace_back(p.x, p.y, p.z);
+      const auto p = _grid.indexToWorld(coord);
+      points.emplace_back(p.x(), p.y(), p.z());
     }
   }
 
 private:
-  VoxelGrid<CellT> _grid;
+  OpenVdbGrid _grid;
   Options _options;
   uint8_t _update_count = 1;
 
-  std::vector<CoordT> _miss_coords;
-  std::vector<CoordT> _hit_coords;
+  std::vector<openvdb::Coord> _miss_coords;
+  std::vector<openvdb::Coord> _hit_coords;
 
-  mutable Bonxai::VoxelGrid<CellT>::Accessor _accessor;
+  mutable OpenVdbGrid::Accessor _accessor;
 
   void updateFreeCells(const Vector3D& origin);
 };
@@ -179,8 +184,8 @@ inline void ProbabilisticMap::insertPointCloud(const std::vector<PointT, Alloc>&
 }
 
 template <class Functor> inline
-void RayIterator(const CoordT& key_origin,
-                 const CoordT& key_end,
+void RayIterator(const openvdb::Coord& key_origin,
+                 const openvdb::Coord& key_end,
                  const Functor &func)
 {
   if (key_origin == key_end)
@@ -192,18 +197,18 @@ void RayIterator(const CoordT& key_origin,
     return;
   }
 
-  CoordT error = { 0, 0, 0 };
-  CoordT coord = key_origin;
-  CoordT delta = (key_end - coord);
-  const CoordT step = { delta.x < 0 ? -1 : 1,
-                        delta.y < 0 ? -1 : 1,
-                        delta.z < 0 ? -1 : 1 };
+  openvdb::Coord error = { 0, 0, 0 };
+  openvdb::Coord coord = key_origin;
+  openvdb::Coord delta = (key_end - coord);
+  const openvdb::Coord step = { delta.x() < 0 ? -1 : 1,
+                        delta.y() < 0 ? -1 : 1,
+                        delta.z() < 0 ? -1 : 1 };
 
-  delta = { delta.x < 0 ? -delta.x : delta.x,
-            delta.y < 0 ? -delta.y : delta.y,
-            delta.z < 0 ? -delta.z : delta.z };
+  delta = { delta.x() < 0 ? -delta.x() : delta.x(),
+            delta.y() < 0 ? -delta.y() : delta.y(),
+            delta.z() < 0 ? -delta.z() : delta.z() };
 
-  const int max = std::max(std::max(delta.x, delta.y), delta.z);
+  const int max = std::max(std::max(delta.x(), delta.y()), delta.z());
 
   // maximum change of any coordinate
   for (int i = 0; i < max - 1; ++i)
@@ -211,20 +216,20 @@ void RayIterator(const CoordT& key_origin,
     // update errors
     error = error + delta;
     // manual loop unrolling
-    if ((error.x << 1) >= max)
+    if ((error.x() << 1) >= max)
     {
-      coord.x += step.x;
-      error.x -= max;
+      coord.x() += step.x();
+      error.x() -= max;
     }
-    if ((error.y << 1) >= max)
+    if ((error.y() << 1) >= max)
     {
-      coord.y += step.y;
-      error.y -= max;
+      coord.y() += step.y();
+      error.y() -= max;
     }
-    if ((error.z << 1) >= max)
+    if ((error.z() << 1) >= max)
     {
-      coord.z += step.z;
-      error.z -= max;
+      coord.z() += step.z();
+      error.z() -= max;
     }
     if(!func(coord))
     {

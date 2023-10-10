@@ -9,17 +9,21 @@ const int32_t ProbabilisticMap::UnknownProbability = ProbabilisticMap::logods(0.
 
 
 
-VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid()
+ProbabilisticMap::OpenVdbGrid& ProbabilisticMap::grid()
 {
   return _grid;
 }
 
 ProbabilisticMap::ProbabilisticMap(double resolution)
-  : _grid(resolution)
-  , _accessor(_grid.createAccessor())
-{}
+  : _grid()
+  , _accessor(_grid.getAccessor())
+{
+  _grid.setTransform(openvdb::math::Transform::createLinearTransform(resolution));
+  _grid.setGridClass(openvdb::GRID_LEVEL_SET);
+  _accessor = _grid.getAccessor();
+}
 
-const VoxelGrid<ProbabilisticMap::CellT>& ProbabilisticMap::grid() const
+const ProbabilisticMap::OpenVdbGrid& ProbabilisticMap::grid() const
 {
   return _grid;
 }
@@ -36,8 +40,9 @@ void ProbabilisticMap::setOptions(const Options& options)
 
 void ProbabilisticMap::addHitPoint(const Vector3D &point)
 {
-  const auto coord = _grid.posToCoord(point);
-  CellT* cell = _accessor.value(coord, true);
+  const auto coord = openvdb::Coord::floor(_grid.worldToIndex(point.data()));
+  int32_t cell_val = _accessor.getValue(coord);
+  CellT* cell = reinterpret_cast<CellT*>(&cell_val);
 
   if (cell->update_id != _update_count)
   {
@@ -45,70 +50,71 @@ void ProbabilisticMap::addHitPoint(const Vector3D &point)
                                      _options.clamp_max_log);
 
     cell->update_id = _update_count;
+    _accessor.setValue(coord, cell_val);
     _hit_coords.push_back(coord);
   }
 }
 
 void ProbabilisticMap::addMissPoint(const Vector3D &point)
 {
-  const auto coord = _grid.posToCoord(point);
-  CellT* cell = _accessor.value(coord, true);
+  const auto coord = openvdb::Coord::floor(_grid.worldToIndex(point.data()));
+  int32_t cell_val = _accessor.getValue(coord);
+  CellT* cell = reinterpret_cast<CellT*>(&cell_val);
 
   if (cell->update_id != _update_count)
   {
-    cell->probability_log = std::max(
-        cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
+    cell->probability_log = std::max(cell->probability_log + _options.prob_miss_log,
+                                     _options.clamp_min_log);
 
     cell->update_id = _update_count;
+    _accessor.setValue(coord, cell_val);
     _miss_coords.push_back(coord);
   }
 }
 
-bool ProbabilisticMap::isOccupied(const CoordT &coord) const
+bool ProbabilisticMap::isOccupied(const openvdb::Coord &coord) const
 {
-  if(auto* cell = _accessor.value(coord, false))
-  {
-    return cell->probability_log > _options.occupancy_threshold_log;
-  }
-  return false;
+  int32_t cell_val = _accessor.getValue(coord);
+  CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+  return cell->probability_log > _options.occupancy_threshold_log;
 }
 
-bool ProbabilisticMap::isUnknown(const CoordT &coord) const
+bool ProbabilisticMap::isUnknown(const openvdb::Coord &coord) const
 {
-  if(auto* cell = _accessor.value(coord, false))
-  {
-    return cell->probability_log == _options.occupancy_threshold_log;
-  }
-  return true;
+  int32_t cell_val = _accessor.getValue(coord);
+  CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+  return cell->probability_log == _options.occupancy_threshold_log;
 }
 
-bool ProbabilisticMap::isFree(const CoordT &coord) const
+bool ProbabilisticMap::isFree(const openvdb::Coord &coord) const
 {
-  if(auto* cell = _accessor.value(coord, false))
-  {
-    return cell->probability_log < _options.occupancy_threshold_log;
-  }
-  return false;
+  int32_t cell_val = _accessor.getValue(coord);
+  CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+  return cell->probability_log < _options.occupancy_threshold_log;
 }
 
 void Bonxai::ProbabilisticMap::updateFreeCells(const Vector3D& origin)
 {
-  auto accessor = _grid.createAccessor();
+  auto accessor = _grid.getAccessor();
 
   // same as addMissPoint, but using lambda will force inlining
-  auto clearPoint = [this, &accessor](const CoordT& coord)
+  auto clearPoint = [this, &accessor](const openvdb::Coord& coord)
   {
-    CellT* cell = accessor.value(coord, true);
+    int32_t cell_val = accessor.getValue(coord);
+    CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+
     if (cell->update_id != _update_count)
     {
-      cell->probability_log = std::max(
-          cell->probability_log + _options.prob_miss_log, _options.clamp_min_log);
+      cell->probability_log = std::max(cell->probability_log + _options.prob_miss_log,
+          _options.clamp_min_log);
+
       cell->update_id = _update_count;
+      accessor.setValue(coord, cell_val);
     }
     return true;
   };
 
-  const auto coord_origin = _grid.posToCoord(origin);
+  const auto coord_origin = openvdb::Coord::floor(_grid.worldToIndex(origin.data()));
 
   for (const auto& coord_end : _hit_coords)
   {
@@ -128,28 +134,30 @@ void Bonxai::ProbabilisticMap::updateFreeCells(const Vector3D& origin)
   }
 }
 
-void ProbabilisticMap::getOccupiedVoxels(std::vector<CoordT>& coords)
+void ProbabilisticMap::getOccupiedVoxels(std::vector<openvdb::Coord>& coords)
 {
   coords.clear();
-  auto visitor = [&](CellT& cell, const CoordT& coord) {
-    if (cell.probability_log > _options.occupancy_threshold_log)
+  for (auto cell_it = _grid.cbeginValueOn(); cell_it.test(); cell_it.next()) {
+    int32_t cell_val = cell_it.getValue();
+    CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+    if (cell->probability_log > _options.occupancy_threshold_log)
     {
-      coords.push_back(coord);
+      coords.push_back(cell_it.getCoord());
     }
-  };
-  _grid.forEachCell(visitor);
+  }
 }
 
-void ProbabilisticMap::getFreeVoxels(std::vector<CoordT>& coords)
+void ProbabilisticMap::getFreeVoxels(std::vector<openvdb::Coord>& coords)
 {
   coords.clear();
-  auto visitor = [&](CellT& cell, const CoordT& coord) {
-    if (cell.probability_log < _options.occupancy_threshold_log)
+  for (auto cell_it = _grid.cbeginValueOn(); cell_it.test(); cell_it.next()) {
+    int32_t cell_val = cell_it.getValue();
+    CellT* cell = reinterpret_cast<CellT*>(&cell_val);
+    if (cell->probability_log < _options.occupancy_threshold_log)
     {
-      coords.push_back(coord);
+      coords.push_back(cell_it.getCoord());
     }
-  };
-  _grid.forEachCell(visitor);
+  }
 }
 
 }  // namespace Bonxai

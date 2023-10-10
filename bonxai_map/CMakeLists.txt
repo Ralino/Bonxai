@@ -1,4 +1,6 @@
 
+find_package(OpenVDB REQUIRED)
+
 add_library(bonxai_map
     include/bonxai_map/pcl_utils.hpp
     include/bonxai_map/probabilistic_map.hpp
@@ -10,10 +12,13 @@ target_compile_definitions(bonxai_map PRIVATE
 
 target_include_directories(bonxai_map PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>)
+    $<INSTALL_INTERFACE:include>
+    ${OpenVDB_INCLUDE_DIRS}
+    )
 
 target_link_libraries(bonxai_map PUBLIC
     bonxai_core
+    ${OpenVDB_LIBRARIES}
     ${PCL_LIBRARIES})
 
 ####################################################
